@@ -1,5 +1,7 @@
 /*
-  24 state EKF based on https://github.com/priseborough/InertialNav
+  24 state EKF based on the derivation in https://github.com/priseborough/
+  InertialNav/blob/master/derivations/RotationVectorAttitudeParameterisation/
+  GenerateNavFilterEquations.m
 
   Converted from Matlab to C++ by Paul Riseborough
 
@@ -23,6 +25,7 @@
 #define EK2_DISABLE_INTERRUPTS 0
 
 
+#include <AP_Common/Location.h>
 #include <AP_Math/AP_Math.h>
 #include "AP_NavEKF2.h"
 #include <stdio.h>
@@ -34,7 +37,7 @@
 #define MASK_GPS_HDOP       (1<<1)
 #define MASK_GPS_SPD_ERR    (1<<2)
 #define MASK_GPS_POS_ERR    (1<<3)
-#define MASK_GPS_YAW_ERR 	(1<<4)
+#define MASK_GPS_YAW_ERR    (1<<4)
 #define MASK_GPS_POS_DRIFT  (1<<5)
 #define MASK_GPS_VERT_SPD   (1<<6)
 #define MASK_GPS_HORIZ_SPD  (1<<7)
@@ -44,6 +47,13 @@
 #define HGT_SOURCE_RNG  1
 #define HGT_SOURCE_GPS  2
 #define HGT_SOURCE_BCN  3
+#define HGT_SOURCE_EV   4
+
+// target EKF update time step
+#define EKF_TARGET_DT 0.01f
+
+// mag fusion final reset altitude
+#define EKF2_MAG_FINAL_RESET_ALT 2.5f
 
 class AP_AHRS;
 
@@ -84,7 +94,7 @@ public:
     // return NED velocity in m/s
     void getVelNED(Vector3f &vel) const;
 
-    // Return the rate of change of vertical position in the down diection (dPosD/dt) in m/s
+    // Return the rate of change of vertical position in the down direction (dPosD/dt) in m/s
     // This can be different to the z component of the EKF velocity state because it will fluctuate with height errors and corrections in the EKF
     // but will always be kinematically consistent with the z component of the EKF position state
     float getPosDownDerivative(void) const;
@@ -154,10 +164,10 @@ public:
     bool getOriginLLH(struct Location &loc) const;
 
     // set the latitude and longitude and height used to set the NED origin
-    // All NED positions calcualted by the filter will be relative to this location
+    // All NED positions calculated by the filter will be relative to this location
     // The origin cannot be set if the filter is in a flight mode (eg vehicle armed)
     // Returns false if the filter has rejected the attempt to set the origin
-    bool setOriginLLH(struct Location &loc);
+    bool setOriginLLH(const Location &loc);
 
     // return estimated height above ground level
     // return false if ground height is not being estimated.
@@ -189,7 +199,7 @@ public:
     // The sign convention is that a RH physical rotation of the sensor about an axis produces both a positive flow and gyro rate
     // msecFlowMeas is the scheduler time in msec when the optical flow data was received from the sensor.
     // posOffset is the XYZ flow sensor position in the body frame in m
-    void  writeOptFlowMeas(uint8_t &rawFlowQuality, Vector2f &rawFlowRates, Vector2f &rawGyroRates, uint32_t &msecFlowMeas, const Vector3f &posOffset);
+    void  writeOptFlowMeas(const uint8_t rawFlowQuality, const Vector2f &rawFlowRates, const Vector2f &rawGyroRates, const uint32_t msecFlowMeas, const Vector3f &posOffset);
 
     // return data for debugging optical flow fusion
     void getFlowDebug(float &varFlow, float &gndOffset, float &flowInnovX, float &flowInnovY, float &auxInnov, float &HAGL, float &rngInnov, float &range, float &gndOffsetErr) const;
@@ -294,7 +304,24 @@ public:
 
     // get the IMU index
     uint8_t getIMUIndex(void) const { return imu_index; }
+
+    // get timing statistics structure
+    void getTimingStatistics(struct ekf_timing &timing);
     
+    /*
+     * Write position and quaternion data from an external navigation system
+     *
+     * sensOffset : position of the external navigation sensor in body frame (m)
+     * pos        : position in the RH navigation frame. Frame is assumed to be NED if frameIsNED is true. (m)
+     * quat       : quaternion desribing the rotation from navigation frame to body frame
+     * posErr     : 1-sigma spherical position error (m)
+     * angErr     : 1-sigma spherical angle error (rad)
+     * timeStamp_ms : system time the measurement was taken, not the time it was received (mSec)
+     * resetTime_ms : system time of the last position reset request (mSec)
+     *
+    */
+    void writeExtNavData(const Vector3f &sensOffset, const Vector3f &pos, const Quaternion &quat, float posErr, float angErr, uint32_t timeStamp_ms, uint32_t resetTime_ms);
+
 private:
     // Reference to the global EKF frontend for parameters
     NavEKF2 *frontend;
@@ -357,7 +384,6 @@ private:
     // the states are available in two forms, either as a Vector31, or
     // broken down as individual elements. Both are equivalent (same
     // memory)
-    Vector28 statesArray;
     struct state_elements {
         Vector3f    angErr;         // 0..2
         Vector3f    velocity;       // 3..5
@@ -369,7 +395,12 @@ private:
         Vector3f    body_magfield;  // 19..21
         Vector2f    wind_vel;       // 22..23
         Quaternion  quat;           // 24..27
-    } &stateStruct;
+    };
+
+    union {
+        Vector28 statesArray;
+        struct state_elements stateStruct;
+    };
 
     struct output_elements {
         Quaternion  quat;           // 0..3
@@ -430,6 +461,18 @@ private:
         const Vector3f *body_offset;// 5..7
     };
 
+    struct ext_nav_elements {
+        bool            frameIsNED; // true if the data is in a NED navigation frame
+        bool            unitsAreSI; // true if the data length units are scaled in metres
+        Vector3f        pos;        // XYZ position measured in a RH navigation frame (m)
+        Quaternion      quat;       // quaternion describing the rotation from navigation to body frame
+        float           posErr;     // spherical poition measurement error 1-std (m)
+        float           angErr;     // spherical angular measurement error 1-std (rad)
+        const Vector3f *body_offset;// pointer to XYZ position of the sensor in body frame (m)
+        uint32_t        time_ms;    // measurement timestamp (msec)
+        bool            posReset;   // true when the position measurement has been reset
+    };
+
     // update the navigation filter status
     void  updateFilterStatus(void);
 
@@ -457,10 +500,10 @@ private:
     // fuse range beacon measurements
     void FuseRngBcn();
 
-    // use range beaon measurements to calculate a static position
+    // use range beacon measurements to calculate a static position
     void FuseRngBcnStatic();
 
-    // calculate the offset from EKF vetical position datum to the range beacon system datum
+    // calculate the offset from EKF vertical position datum to the range beacon system datum
     void CalcRangeBeaconPosDownOffset(float obsVar, Vector3f &vehiclePosNED, bool aligning);
 
     // fuse magnetometer measurements
@@ -469,7 +512,7 @@ private:
     // fuse true airspeed measurements
     void FuseAirspeed();
 
-    // fuse sythetic sideslip measurement of zero
+    // fuse synthetic sideslip measurement of zero
     void FuseSideslip();
 
     // zero specified range of rows in the state covariance matrix
@@ -485,7 +528,7 @@ private:
     void StoreQuatReset(void);
 
     // Rotate the stored output quaternion history through a quaternion rotation
-    void StoreQuatRotate(Quaternion deltaQuat);
+    void StoreQuatRotate(const Quaternion &deltaQuat);
 
     // store altimeter data
     void StoreBaro();
@@ -533,7 +576,7 @@ private:
 
     // helper functions for readIMUData
     bool readDeltaVelocity(uint8_t ins_index, Vector3f &dVel, float &dVel_dt);
-    bool readDeltaAngle(uint8_t ins_index, Vector3f &dAng);
+    bool readDeltaAngle(uint8_t ins_index, Vector3f &dAng, float &dAng_dt);
 
     // helper functions for correcting IMU data
     void correctDeltaAngle(Vector3f &delAng, float delAngDT);
@@ -560,7 +603,7 @@ private:
     // determine when to perform fusion of GPS position and  velocity measurements
     void SelectVelPosFusion();
 
-    // determine when to perform fusion of range measurements take realtive to a beacon at a known NED position
+    // determine when to perform fusion of range measurements take relative to a beacon at a known NED position
     void SelectRngBcnFusion();
 
     // determine when to perform fusion of magnetometer measurements
@@ -575,12 +618,14 @@ private:
     // force alignment of the yaw angle using GPS velocity data
     void realignYawGPS();
 
-    // initialise the earth magnetic field states using declination and current attitude and magnetometer meaasurements
+    // initialise the earth magnetic field states using declination and current attitude and magnetometer measurements
     // and return attitude quaternion
     Quaternion calcQuatAndFieldStates(float roll, float pitch);
 
     // zero stored variables
     void InitialiseVariables();
+
+    void InitialiseVariablesMag();
 
     // reset the horizontal position states uing the last GPS measurement
     void ResetPosition(void);
@@ -599,6 +644,9 @@ private:
 
     // return true if the filter to be ready to use the beacon range measurements
     bool readyToUseRangeBeacon(void) const;
+
+    // return true if the filter to be ready to use external nav data
+    bool readyToUseExtNav(void) const;
 
     // Check for filter divergence
     void checkDivergence(void);
@@ -683,8 +731,8 @@ private:
     // calculate a filtered offset between baro height measurement and EKF height estimate
     void calcFiltBaroOffset();
 
-    // calculate a filtered offset between GPS height measurement and EKF height estimate
-    void calcFiltGpsHgtOffset();
+    // correct the height of the EKF origin to be consistent with GPS Data using a Bayes filter.
+    void correctEkfOriginHeight();
 
     // Select height data to be fused from the available baro, range finder and GPS sources
     void selectHeightForFusion();
@@ -700,6 +748,9 @@ private:
 
     // effective value of MAG_CAL
     uint8_t effective_magCal(void) const;
+
+    // update timing statistics structure
+    void updateTimingStatistics(void);
     
     // Length of FIFO buffers used for non-IMU sensor data.
     // Must be larger than the time period defined by IMU_BUFFER_LENGTH
@@ -719,8 +770,6 @@ private:
     bool tasTimeout;                // boolean true if true airspeed measurements have failed for too long and have timed out
     bool badMagYaw;                 // boolean true if the magnetometer is declared to be producing bad data
     bool badIMUdata;                // boolean true if the bad IMU data is detected
-
-    const float EKF_TARGET_DT = 0.01f;    // target EKF update time step
 
     float gpsNoiseScaler;           // Used to scale the  GPS measurement noise and consistency gates to compensate for operation with small satellite counts
     Vector28 Kfusion;               // Kalman gain vector
@@ -750,6 +799,7 @@ private:
     uint32_t airborneDetectTime_ms; // last time flight movement was detected
     Vector6 innovVelPos;            // innovation output for a group of measurements
     Vector6 varInnovVelPos;         // innovation variance output for a group of measurements
+    Vector6 velPosObs;              // observations for combined velocity and positon group of measurements (3x1 m , 3x1 m/s)
     bool fuseVelData;               // this boolean causes the velNED measurements to be fused
     bool fusePosData;               // this boolean causes the posNE measurements to be fused
     bool fuseHgtData;               // this boolean causes the hgtMea measurements to be fused
@@ -757,8 +807,8 @@ private:
     Vector3f varInnovMag;           // innovation variance output from fusion of X,Y,Z compass measurements
     ftype innovVtas;                // innovation output from fusion of airspeed measurements
     ftype varInnovVtas;             // innovation variance output from fusion of airspeed measurements
-    bool magFusePerformed;          // boolean set to true when magnetometer fusion has been perfomred in that time step
-    bool magFuseRequired;           // boolean set to true when magnetometer fusion will be perfomred in the next time step
+    bool magFusePerformed;          // boolean set to true when magnetometer fusion has been performed in that time step
+    bool magFuseRequired;           // boolean set to true when magnetometer fusion will be performed in the next time step
     uint32_t prevTasStep_ms;        // time stamp of last TAS fusion step
     uint32_t prevBetaStep_ms;       // time stamp of last synthetic sideslip fusion step
     uint32_t lastMagUpdate_us;      // last time compass was updated in usec
@@ -777,7 +827,7 @@ private:
     uint32_t secondLastGpsTime_ms;  // time of second last GPS fix used to determine how long since last update
     uint32_t lastHealthyMagTime_ms; // time the magnetometer was last declared healthy
     bool allMagSensorsFailed;       // true if all magnetometer sensors have timed out on this flight and we are no longer using magnetometer data
-    uint32_t lastSynthYawTime_ms;   // time stamp when synthetic yaw measurement was last fused to maintain covariance health (msec)
+    uint32_t lastYawTime_ms;        // time stamp when yaw observation was last fused (msec)
     uint32_t ekfStartTime_ms;       // time the EKF was started (msec)
     Matrix24 nextP;                 // Predicted covariance matrix before addition of process noise to diagonals
     Vector24 processNoise;          // process noise added to diagonals of predicted covariance matrix
@@ -795,7 +845,8 @@ private:
     bool inhibitWindStates;         // true when wind states and covariances are to remain constant
     bool inhibitMagStates;          // true when magnetic field states and covariances are to remain constant
     bool gpsNotAvailable;           // bool true when valid GPS data is not available
-    struct Location EKF_origin;     // LLH origin of the NED axis system - do not change unless filter is reset
+    uint8_t last_gps_idx;           // sensor ID of the GPS receiver used for the last fusion or reset
+    struct Location EKF_origin;     // LLH origin of the NED axis system
     bool validOrigin;               // true when the EKF origin is valid
     float gpsSpdAccuracy;           // estimated speed accuracy in m/s returned by the GPS receiver
     float gpsPosAccuracy;           // estimated position accuracy in m returned by the GPS receiver
@@ -870,11 +921,13 @@ private:
     Vector3f delAngCorrected;       // corrected IMU delta angle vector at the EKF time horizon (rad)
     Vector3f delVelCorrected;       // corrected IMU delta velocity vector at the EKF time horizon (m/s)
     bool magFieldLearned;           // true when the magnetic field has been learned
+    uint32_t wasLearningCompass_ms; // time when we were last waiting for compass learn to complete
     Vector3f earthMagFieldVar;      // NED earth mag field variances for last learned field (mGauss^2)
     Vector3f bodyMagFieldVar;       // XYZ body mag field variances for last learned field (mGauss^2)
     bool delAngBiasLearned;         // true when the gyro bias has been learned
     nav_filter_status filterStatus; // contains the status of various filter outputs
-    float ekfOriginHgtVar;          // Variance of the the EKF WGS-84 origin height estimate (m^2)
+    float ekfOriginHgtVar;          // Variance of the EKF WGS-84 origin height estimate (m^2)
+    double ekfGpsRefHgt;            // floating point representation of the WGS-84 reference height used to convert GPS height to local height (m)
     uint32_t lastOriginHgtTime_ms;  // last time the ekf's WGS-84 origin height was corrected
     Vector3f outputTrackError;      // attitude (rad), velocity (m/s) and position (m) tracking error magnitudes from the output observer
     Vector3f velOffsetNED;          // This adds to the earth frame velocity estimate at the IMU to give the velocity at the body origin (m/s)
@@ -910,13 +963,9 @@ private:
     of_elements ofDataNew;          // OF data at the current time horizon
     of_elements ofDataDelayed;      // OF data at the fusion time horizon
     uint8_t ofStoreIndex;           // OF data storage index
-    bool flowDataToFuse;            // true when optical flow data has is ready for fusion
+    bool flowDataToFuse;            // true when optical flow data is ready for fusion
     bool flowDataValid;             // true while optical flow data is still fresh
-    bool fuseOptFlowData;           // this boolean causes the last optical flow measurement to be fused
-    float auxFlowObsInnov;          // optical flow rate innovation from 1-state terrain offset estimator
-    float auxFlowObsInnovVar;       // innovation variance for optical flow observations from 1-state terrain offset estimator
-    Vector2 flowRadXYcomp;          // motion compensated optical flow angular rates(rad/sec)
-    Vector2 flowRadXY;              // raw (non motion compensated) optical flow angular rates (rad/sec)
+    Vector2f auxFlowObsInnov;       // optical flow rate innovation from 1-state terrain offset estimator
     uint32_t flowValidMeaTime_ms;   // time stamp from latest valid flow measurement (msec)
     uint32_t rngValidMeaTime_ms;    // time stamp from latest valid range measurement (msec)
     uint32_t flowMeaTime_ms;        // time stamp from latest flow measurement (msec)
@@ -934,7 +983,7 @@ private:
     bool inhibitGndState;           // true when the terrain position state is to remain constant
     uint32_t prevFlowFuseTime_ms;   // time both flow measurement components passed their innovation consistency checks
     Vector2 flowTestRatio;          // square of optical flow innovations divided by fail threshold used by main filter where >1.0 is a fail
-    float auxFlowTestRatio;         // sum of squares of optical flow innovation divided by fail threshold used by 1-state terrain offset estimator
+    Vector2f auxFlowTestRatio;      // sum of squares of optical flow innovation divided by fail threshold used by 1-state terrain offset estimator
     float R_LOS;                    // variance of optical flow rate measurements (rad/sec)^2
     float auxRngTestRatio;          // square of range finder innovations divided by fail threshold used by main filter where >1.0 is a fail
     Vector2f flowGyroBias;          // bias error of optical flow sensor gyro output
@@ -1040,6 +1089,17 @@ private:
     float yawInnovAtLastMagReset;   // magnetic yaw innovation last time the yaw and mag field states were reset (rad)
     Quaternion quatAtLastMagReset;  // quaternion states last time the mag states were reset
 
+    // external navigation fusion
+    obs_ring_buffer_t<ext_nav_elements> storedExtNav; // external navigation data buffer
+    ext_nav_elements extNavDataNew;     // External nav data at the current time horizon
+    ext_nav_elements extNavDataDelayed; // External nav at the fusion time horizon
+    uint32_t extNavMeasTime_ms;         // time external measurements were accepted for input to the data buffer (msec)
+    uint32_t extNavLastPosResetTime_ms; // last time the external nav systen performed a position reset (msec)
+    bool extNavDataToFuse;              // true when there is new external nav data to fuse
+    bool extNavUsedForYaw;              // true when the external nav data is also being used as a yaw observation
+    bool extNavUsedForPos;              // true when the external nav data is being used as a position reference.
+    bool extNavYawResetRequest;         // true when a reset of vehicle yaw using the external nav data is requested
+
     // flags indicating severe numerical errors in innovation variance calculation for different fusion operations
     struct {
         bool bad_xmag:1;
@@ -1064,6 +1124,7 @@ private:
     struct {
         bool bad_sAcc:1;
         bool bad_hAcc:1;
+        bool bad_vAcc:1;
         bool bad_yaw:1;
         bool bad_sats:1;
         bool bad_VZ:1;
@@ -1096,7 +1157,7 @@ private:
     } mag_state;
 
     // string representing last reason for prearm failure
-    char prearm_fail_string[40];
+    char prearm_fail_string[41];
 
     // performance counters
     AP_HAL::Util::perf_counter_t  _perf_UpdateFilter;
@@ -1109,6 +1170,12 @@ private:
     AP_HAL::Util::perf_counter_t  _perf_FuseOptFlow;
     AP_HAL::Util::perf_counter_t  _perf_test[10];
 
+    // timing statistics
+    struct ekf_timing timing;
+
+    // when was attitude filter status last non-zero?
+    uint32_t last_filter_ok_ms;
+    
     // should we assume zero sideslip?
     bool assume_zero_sideslip(void) const;
 

@@ -62,7 +62,7 @@
 #endif
 
 //
-// Dataflash logging control
+// Logging control
 //
 #ifndef LOGGING_ENABLED
 # define LOGGING_ENABLED        ENABLED
@@ -76,5 +76,6 @@
     MASK_LOG_RCIN | \
     MASK_LOG_IMU | \
     MASK_LOG_RCOUT | \
-    MASK_LOG_COMPASS
+    MASK_LOG_COMPASS | \
+    MASK_LOG_CURRENT
 #endif

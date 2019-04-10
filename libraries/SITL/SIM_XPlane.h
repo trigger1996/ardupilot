@@ -32,7 +32,7 @@ public:
     XPlane(const char *home_str, const char *frame_str);
 
     /* update model by one time step */
-    void update(const struct sitl_input &input);
+    void update(const struct sitl_input &input) override;
 
     /* static object creator */
     static Aircraft *create(const char *home_str, const char *frame_str) {
@@ -68,6 +68,8 @@ private:
 
     // are we controlling a heli?
     bool heli_frame;
+
+    uint64_t unselected_mask;
     
     // throttle joystick input is very weird. See comments in the main code
     const float throttle_magic = 0.000123f;

@@ -10,9 +10,11 @@
 #include "AP_Gripper_EPM.h"
 #include <AP_HAL/AP_HAL.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
+#include <GCS_MAVLink/GCS.h>
+#ifdef UAVCAN_NODE_FILE
 #include <fcntl.h>
-#include <unistd.h>
-#include <cstdio>
+#include <stdio.h>
+#endif
 
 extern const AP_HAL::HAL& hal;
 
@@ -55,8 +57,9 @@ void AP_Gripper_EPM::grab()
 #endif
     {
         // move the servo output to the grab position
-        RC_Channel_aux::set_radio(RC_Channel_aux::k_gripper, config.grab_pwm);
+        SRV_Channels::set_output_pwm(SRV_Channel::k_gripper, config.grab_pwm);
     }
+    gcs().send_text(MAV_SEVERITY_INFO, "Gripper load grabbing");
 }
 
 // release - move epm pwm output to the release position
@@ -77,8 +80,9 @@ void AP_Gripper_EPM::release()
 #endif
     {
         // move the servo to the release position
-        RC_Channel_aux::set_radio(RC_Channel_aux::k_gripper, config.release_pwm);
+        SRV_Channels::set_output_pwm(SRV_Channel::k_gripper, config.release_pwm);
     }
+    gcs().send_text(MAV_SEVERITY_INFO, "Gripper load releasing");
 }
 
 // neutral - return the epm pwm output to the neutral position
@@ -86,7 +90,7 @@ void AP_Gripper_EPM::neutral()
 {
     if (!should_use_uavcan()) {
         // move the servo to the off position
-        RC_Channel_aux::set_radio(RC_Channel_aux::k_gripper, config.neutral_pwm);
+        SRV_Channels::set_output_pwm(SRV_Channel::k_gripper, config.neutral_pwm);
     }
 }
 

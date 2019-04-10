@@ -27,11 +27,13 @@
 
 #include <assert.h>
 #include <stdio.h>
+#if HAL_OS_POSIX_IO
 #include <unistd.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#endif
+#include <sys/types.h>
 
 extern const AP_HAL::HAL& hal;
 
@@ -171,22 +173,36 @@ void AP_Terrain::open_file(void)
     }
     snprintf(p, 13, "/%c%02u%c%03u.DAT",
              block.lat_degrees<0?'S':'N',
-             abs(block.lat_degrees),
+             (unsigned)MIN(abs((int32_t)block.lat_degrees), 99),
              block.lon_degrees<0?'W':'E',
-             abs(block.lon_degrees));
+             (unsigned)MIN(abs((int32_t)block.lon_degrees), 999));
 
     // create directory if need be
     if (!directory_created) {
         *p = 0;
-        mkdir(file_path, 0755);
-        directory_created = true;
+        directory_created = !mkdir(file_path, 0755);
         *p = '/';
+
+        if (!directory_created) {
+            if (errno == EEXIST) {
+                // directory already existed
+                directory_created = true;
+            } else {
+                // if we didn't succeed at making the directory, then IO failed
+                io_failure = true;
+                return;
+            }
+        }
     }
 
     if (fd != -1) {
         ::close(fd);
     }
+#if HAL_OS_POSIX_IO
     fd = ::open(file_path, O_RDWR|O_CREAT|O_CLOEXEC, 0644);
+#else
+    fd = ::open(file_path, O_RDWR|O_CREAT|O_CLOEXEC);
+#endif
     if (fd == -1) {
 #if TERRAIN_DEBUG
         hal.console->printf("Open %s failed - %s\n",
@@ -214,8 +230,8 @@ void AP_Terrain::seek_offset(void)
     loc2.lng = (block.lon_degrees+1)*10*1000*1000L;
 
     // shift another two blocks east to ensure room is available
-    location_offset(loc2, 0, 2*grid_spacing*TERRAIN_GRID_BLOCK_SIZE_Y);
-    Vector2f offset = location_diff(loc1, loc2);
+    loc2.offset(0, 2*grid_spacing*TERRAIN_GRID_BLOCK_SIZE_Y);
+    const Vector2f offset = loc1.get_distance_NE(loc2);
     uint16_t east_blocks = offset.y / (grid_spacing*TERRAIN_GRID_BLOCK_SIZE_Y);
 
     uint32_t file_offset = (east_blocks * block.grid_idx_x + 

@@ -1,6 +1,7 @@
 #include "Copter.h"
 #include <AP_Notify/AP_Notify.h>
 
+#if ADSB_ENABLED == ENABLED
 void Copter::avoidance_adsb_update(void)
 {
     adsb.update();
@@ -24,7 +25,9 @@ MAV_COLLISION_ACTION AP_Avoidance_Copter::handle_avoidance(const AP_Avoidance::O
 
     // take no action in some flight modes
     if (copter.control_mode == LAND ||
+#if MODE_THROW_ENABLED == ENABLED
         copter.control_mode == THROW ||
+#endif
         copter.control_mode == FLIP) {
         actual_action = MAV_COLLISION_ACTION_NONE;
     }
@@ -85,9 +88,9 @@ MAV_COLLISION_ACTION AP_Avoidance_Copter::handle_avoidance(const AP_Avoidance::O
         }
     }
 
-    // log to dataflash
     if (failsafe_state_change) {
-        copter.Log_Write_Error(ERROR_SUBSYSTEM_FAILSAFE_ADSB, actual_action);
+        AP::logger().Write_Error(LogErrorSubsystem::FAILSAFE_ADSB,
+                                 LogErrorCode(actual_action));
     }
 
     // return with action taken
@@ -99,7 +102,8 @@ void AP_Avoidance_Copter::handle_recovery(uint8_t recovery_action)
     // check we are coming out of failsafe
     if (copter.failsafe.adsb) {
         copter.failsafe.adsb = false;
-        copter.Log_Write_Error(ERROR_SUBSYSTEM_FAILSAFE_ADSB, ERROR_CODE_ERROR_RESOLVED);
+        AP::logger().Write_Error(LogErrorSubsystem::FAILSAFE_ADSB,
+                                 LogErrorCode::ERROR_RESOLVED);
 
         // restore flight mode if requested and user has not changed mode since
         if (copter.control_mode_reason == MODE_REASON_AVOIDANCE) {
@@ -172,9 +176,9 @@ bool AP_Avoidance_Copter::handle_avoidance_vertical(const AP_Avoidance::Obstacle
     // get best vector away from obstacle
     Vector3f velocity_neu;
     if (should_climb) {
-        velocity_neu.z = copter.wp_nav.get_speed_up();
+        velocity_neu.z = copter.wp_nav->get_default_speed_up();
     } else {
-        velocity_neu.z = -copter.wp_nav.get_speed_down();
+        velocity_neu.z = -copter.wp_nav->get_default_speed_down();
         // do not descend if below RTL alt
         if (copter.current_loc.alt < copter.g.rtl_altitude) {
             velocity_neu.z = 0.0f;
@@ -182,7 +186,7 @@ bool AP_Avoidance_Copter::handle_avoidance_vertical(const AP_Avoidance::Obstacle
     }
 
     // send target velocity
-    copter.avoid_adsb_set_velocity(velocity_neu);
+    copter.mode_avoid_adsb.set_velocity(velocity_neu);
     return true;
 }
 
@@ -205,10 +209,10 @@ bool AP_Avoidance_Copter::handle_avoidance_horizontal(const AP_Avoidance::Obstac
         // re-normalise
         velocity_neu.normalize();
         // convert horizontal components to velocities
-        velocity_neu.x *= copter.wp_nav.get_speed_xy();
-        velocity_neu.y *= copter.wp_nav.get_speed_xy();
+        velocity_neu.x *= copter.wp_nav->get_default_speed_xy();
+        velocity_neu.y *= copter.wp_nav->get_default_speed_xy();
         // send target velocity
-        copter.avoid_adsb_set_velocity(velocity_neu);
+        copter.mode_avoid_adsb.set_velocity(velocity_neu);
         return true;
     }
 
@@ -227,23 +231,24 @@ bool AP_Avoidance_Copter::handle_avoidance_perpendicular(const AP_Avoidance::Obs
     Vector3f velocity_neu;
     if (get_vector_perpendicular(obstacle, velocity_neu)) {
         // convert horizontal components to velocities
-        velocity_neu.x *= copter.wp_nav.get_speed_xy();
-        velocity_neu.y *= copter.wp_nav.get_speed_xy();
+        velocity_neu.x *= copter.wp_nav->get_default_speed_xy();
+        velocity_neu.y *= copter.wp_nav->get_default_speed_xy();
         // use up and down waypoint speeds
         if (velocity_neu.z > 0.0f) {
-            velocity_neu.z *= copter.wp_nav.get_speed_up();
+            velocity_neu.z *= copter.wp_nav->get_default_speed_up();
         } else {
-            velocity_neu.z *= copter.wp_nav.get_speed_down();
+            velocity_neu.z *= copter.wp_nav->get_default_speed_down();
             // do not descend if below RTL alt
             if (copter.current_loc.alt < copter.g.rtl_altitude) {
                 velocity_neu.z = 0.0f;
             }
         }
         // send target velocity
-        copter.avoid_adsb_set_velocity(velocity_neu);
+        copter.mode_avoid_adsb.set_velocity(velocity_neu);
         return true;
     }
 
     // if we got this far we failed to set the new target
     return false;
 }
+#endif

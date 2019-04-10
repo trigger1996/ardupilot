@@ -11,14 +11,12 @@
 #define AC_CIRCLE_RATE_DEFAULT      20.0f       // turn rate in deg/sec.  Positive to turn clockwise, negative for counter clockwise
 #define AC_CIRCLE_ANGULAR_ACCEL_MIN 2.0f        // angular acceleration should never be less than 2deg/sec
 
-#define AC_CIRCLE_DEGX100           5729.57795f // constant to convert from radians to centi-degrees
-
 class AC_Circle
 {
 public:
 
     /// Constructor
-    AC_Circle(const AP_InertialNav& inav, const AP_AHRS& ahrs, AC_PosControl& pos_control);
+    AC_Circle(const AP_InertialNav& inav, const AP_AHRS_View& ahrs, AC_PosControl& pos_control);
 
     /// init - initialise circle controller setting center specifically
     ///     caller should set the position controller's x,y and z speeds and accelerations before calling this
@@ -49,9 +47,9 @@ public:
     void update();
 
     /// get desired roll, pitch which should be fed into stabilize controllers
-    int32_t get_roll() const { return _pos_control.get_roll(); }
-    int32_t get_pitch() const { return _pos_control.get_pitch(); }
-    int32_t get_yaw() const { return _yaw; }
+    float get_roll() const { return _pos_control.get_roll(); }
+    float get_pitch() const { return _pos_control.get_pitch(); }
+    float get_yaw() const { return _yaw; }
 
     // get_closest_point_on_circle - returns closest point on the circle
     //  circle's center should already have been set
@@ -59,6 +57,12 @@ public:
     //  result's altitude (i.e. z) will be set to the circle_center's altitude
     //  if vehicle is at the center of the circle, the edge directly behind vehicle will be returned
     void get_closest_point_on_circle(Vector3f &result);
+
+    /// get horizontal distance to loiter target in cm
+    float get_distance_to_target() const { return _pos_control.get_distance_to_target(); }
+
+    /// get bearing to target in centi-degrees
+    int32_t get_bearing_to_target() const { return _pos_control.get_bearing_to_target(); }
 
     static const struct AP_Param::GroupInfo var_info[];
 
@@ -82,7 +86,7 @@ private:
 
     // references to inertial nav and ahrs libraries
     const AP_InertialNav&       _inav;
-    const AP_AHRS&              _ahrs;
+    const AP_AHRS_View&         _ahrs;
     AC_PosControl&              _pos_control;
 
     // parameters
@@ -93,7 +97,7 @@ private:
     Vector3f    _center;        // center of circle in cm from home
     float       _yaw;           // yaw heading (normally towards circle center)
     float       _angle;         // current angular position around circle in radians (0=directly north of the center of the circle)
-    float       _angle_total;   // total angle travelled in radians
+    float       _angle_total;   // total angle traveled in radians
     float       _angular_vel;   // angular velocity in radians/sec
     float       _angular_vel_max;   // maximum velocity in radians/sec
     float       _angular_accel; // angular acceleration in radians/sec/sec

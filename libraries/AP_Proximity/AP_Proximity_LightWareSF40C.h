@@ -16,11 +16,11 @@ public:
     static bool detect(AP_SerialManager &serial_manager);
 
     // update state
-    void update(void);
+    void update(void) override;
 
     // get maximum and minimum distances (in meters) of sensor
-    float distance_max() const;
-    float distance_min() const;
+    float distance_max() const override;
+    float distance_min() const override;
 
 private:
 
@@ -33,7 +33,7 @@ private:
         RequestType_DistanceMeasurement
     };
 
-    // initialise sensor (returns true if sensor is succesfully initialised)
+    // initialise sensor (returns true if sensor is successfully initialised)
     bool initialise();
     void init_sectors();
     void set_motor_speed(bool on_off);

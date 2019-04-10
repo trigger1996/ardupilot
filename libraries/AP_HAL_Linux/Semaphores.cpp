@@ -6,6 +6,21 @@ extern const AP_HAL::HAL& hal;
 
 using namespace Linux;
 
+// construct a semaphore
+Semaphore::Semaphore()
+{
+    pthread_mutex_init(&_lock, nullptr);
+}
+
+// construct a recursive semaphore (allows a thread to take it more than once)
+Semaphore_Recursive::Semaphore_Recursive()
+{
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&_lock, &attr);
+}
+
 bool Semaphore::give()
 {
     return pthread_mutex_unlock(&_lock) == 0;
@@ -13,7 +28,7 @@ bool Semaphore::give()
 
 bool Semaphore::take(uint32_t timeout_ms)
 {
-    if (timeout_ms == 0) {
+    if (timeout_ms == HAL_SEMAPHORE_BLOCK_FOREVER) {
         return pthread_mutex_lock(&_lock) == 0;
     }
     if (take_nonblocking()) {
@@ -33,3 +48,4 @@ bool Semaphore::take_nonblocking()
 {
     return pthread_mutex_trylock(&_lock) == 0;
 }
+

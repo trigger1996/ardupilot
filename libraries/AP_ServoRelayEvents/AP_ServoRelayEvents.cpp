@@ -21,13 +21,19 @@
 #include <AP_Common/AP_Common.h>
 #include "AP_ServoRelayEvents.h"
 #include <RC_Channel/RC_Channel.h>
+#include <SRV_Channel/SRV_Channel.h>
+#include <GCS_MAVLink/GCS.h>
 
 extern const AP_HAL::HAL& hal;
 
 bool AP_ServoRelayEvents::do_set_servo(uint8_t _channel, uint16_t pwm)
 {
-    if (!(mask & 1U<<(_channel-1))) {
-        // not allowed
+    SRV_Channel *c = SRV_Channels::srv_channel(_channel-1);
+    if (c == nullptr) {
+        return false;
+    }
+    if (c->get_function() != SRV_Channel::k_none) {
+        gcs().send_text(MAV_SEVERITY_INFO, "ServoRelayEvent: Channel %d is already in use", _channel);
         return false;
     }
     if (type == EVENT_TYPE_SERVO && 
@@ -35,8 +41,7 @@ bool AP_ServoRelayEvents::do_set_servo(uint8_t _channel, uint16_t pwm)
         // cancel previous repeat
         repeat = 0;
     }
-    hal.rcout->enable_ch(_channel-1);
-    hal.rcout->write(_channel-1, pwm);
+    c->set_output_pwm(pwm);
     return true;
 }
 
@@ -63,8 +68,12 @@ bool AP_ServoRelayEvents::do_set_relay(uint8_t relay_num, uint8_t state)
 bool AP_ServoRelayEvents::do_repeat_servo(uint8_t _channel, uint16_t _servo_value, 
                                           int16_t _repeat, uint16_t _delay_ms)
 {
-    if (!(mask & 1U<<(_channel-1))) {
-        // not allowed
+    SRV_Channel *c = SRV_Channels::srv_channel(_channel-1);
+    if (c == nullptr) {
+        return false;
+    }
+    if (c->get_function() != SRV_Channel::k_none) {
+        gcs().send_text(MAV_SEVERITY_INFO, "ServoRelayEvent: Channel %d is already in use", _channel);
         return false;
     }
     channel = _channel;
@@ -105,14 +114,17 @@ void AP_ServoRelayEvents::update_events(void)
     start_time_ms = AP_HAL::millis();
 
     switch (type) {
-    case EVENT_TYPE_SERVO:
-        hal.rcout->enable_ch(channel-1);
-        if (repeat & 1) {
-            hal.rcout->write(channel-1, RC_Channel::rc_channel(channel-1)->get_radio_trim());
-        } else {
-            hal.rcout->write(channel-1, servo_value);
+    case EVENT_TYPE_SERVO: {
+        SRV_Channel *c = SRV_Channels::srv_channel(channel-1);
+        if (c != nullptr) {
+            if (repeat & 1) {
+                c->set_output_pwm(c->get_trim());
+            } else {
+                c->set_output_pwm(servo_value);
+            }
         }
         break;
+    }
         
     case EVENT_TYPE_RELAY:
         relay.toggle(channel);
@@ -125,4 +137,16 @@ void AP_ServoRelayEvents::update_events(void)
         // toggle bottom bit so servos flip in value
         repeat ^= 1;
     }
+}
+
+// singleton instance
+AP_ServoRelayEvents *AP_ServoRelayEvents::_singleton;
+
+namespace AP {
+
+AP_ServoRelayEvents *servorelayevents()
+{
+    return AP_ServoRelayEvents::get_singleton();
+}
+
 }

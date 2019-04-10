@@ -1,13 +1,7 @@
 #include "Tracker.h"
-#include "version.h"
 
 // mission storage
 static const StorageAccess wp_storage(StorageManager::StorageMission);
-
-static void mavlink_snoop_static(const mavlink_message_t* msg)
-{
-    tracker.mavlink_snoop(msg);
-}
 
 static void mavlink_delay_cb_static()
 {
@@ -19,14 +13,12 @@ void Tracker::init_tracker()
     // initialise console serial port
     serial_manager.init_console();
 
-    hal.console->printf("\n\nInit " THISFIRMWARE
-                               "\n\nFree RAM: %u\n",
-                          hal.util->available_memory());
+    hal.console->printf("\n\nInit %s\n\nFree RAM: %u\n",
+                        AP::fwversion().fw_string,
+                        (unsigned)hal.util->available_memory());
 
     // Check the EEPROM format version before loading any parameters from EEPROM
     load_parameters();
-
-    GCS_MAVLINK::set_dataflash(&DataFlash);
 
     mavlink_system.sysid = g.sysid_this_mav;
 
@@ -34,43 +26,45 @@ void Tracker::init_tracker()
     serial_manager.init();
 
     // setup first port early to allow BoardConfig to report errors
-    gcs[0].setup_uart(serial_manager, AP_SerialManager::SerialProtocol_MAVLink, 0);
+    gcs().chan(0).setup_uart(serial_manager, AP_SerialManager::SerialProtocol_MAVLink, 0);
 
     // Register mavlink_delay_cb, which will run anytime you have
     // more than 5ms remaining in your call to hal.scheduler->delay
     hal.scheduler->register_delay_callback(mavlink_delay_cb_static, 5);
-    
+
     BoardConfig.init();
+#if HAL_WITH_UAVCAN
+    BoardConfig_CAN.init();
+#endif
+
+    // initialise notify
+    notify.init();
+    AP_Notify::flags.pre_arm_check = true;
+    AP_Notify::flags.pre_arm_gps_check = true;
 
     // init baro before we start the GCS, so that the CLI baro test works
+    barometer.set_log_baro_bit(MASK_LOG_IMU);
     barometer.init();
 
-    // we start by assuming USB connected, as we initialed the serial
-    // port with SERIAL0_BAUD. check_usb_mux() fixes this if need be.    
-    usb_connected = true;
-    check_usb_mux();
-
     // setup telem slots with serial ports
-    for (uint8_t i = 1; i < MAVLINK_COMM_NUM_BUFFERS; i++) {
-        gcs[i].setup_uart(serial_manager, AP_SerialManager::SerialProtocol_MAVLink, i);
-        gcs[i].set_snoop(mavlink_snoop_static);
-    }
+    gcs().setup_uarts(serial_manager);
 
 #if LOGGING_ENABLED == ENABLED
     log_init();
 #endif
 
-    if (g.compass_enabled==true) {
-        if (!compass.init() || !compass.read()) {
-            hal.console->println("Compass initialisation failed!");
-            g.compass_enabled = false;
-        } else {
-            ahrs.set_compass(&compass);
-        }
+#ifdef ENABLE_SCRIPTING
+    if (!scripting.init()) {
+        gcs().send_text(MAV_SEVERITY_ERROR, "Scripting failed to start");
     }
+#endif // ENABLE_SCRIPTING
+
+    // initialise compass
+    AP::compass().init();
 
     // GPS Initialization
-    gps.init(nullptr, serial_manager);
+    gps.set_log_gps_bit(MASK_LOG_GPS);
+    gps.init(serial_manager);
 
     ahrs.init();
     ahrs.set_fly_forward(false);
@@ -78,7 +72,10 @@ void Tracker::init_tracker()
     ins.init(scheduler.get_loop_rate_hz());
     ahrs.reset();
 
-    init_barometer(true);
+    barometer.calibrate();
+
+    // initialise AP_Logger library
+    logger.setVehicle_Startup_Writer(FUNCTOR_BIND(&tracker, &Tracker::Log_Write_Vehicle_Startup_Messages, void));
 
     // set serial ports non-blocking
     serial_manager.set_blocking_writes_all(false);
@@ -93,7 +90,7 @@ void Tracker::init_tracker()
         current_loc.lat = g.start_latitude * 1.0e7f;
         current_loc.lng = g.start_longitude * 1.0e7f;
     } else {
-        gcs_send_text(MAV_SEVERITY_NOTICE, "Ignoring invalid START_LATITUDE or START_LONGITUDE parameter");
+        gcs().send_text(MAV_SEVERITY_NOTICE, "Ignoring invalid START_LATITUDE or START_LONGITUDE parameter");
     }
 
     // see if EEPROM has a default location as well
@@ -101,12 +98,27 @@ void Tracker::init_tracker()
         get_home_eeprom(current_loc);
     }
 
-    init_capabilities();
-
-    gcs_send_text(MAV_SEVERITY_INFO,"Ready to track");
+    gcs().send_text(MAV_SEVERITY_INFO,"Ready to track");
     hal.scheduler->delay(1000); // Why????
 
-    set_mode(AUTO); // tracking
+    switch (g.initial_mode) {
+    case MANUAL:
+        set_mode(MANUAL, MODE_REASON_STARTUP);
+        break;
+
+    case SCAN:
+        set_mode(SCAN, MODE_REASON_STARTUP);
+        break;
+
+    case STOP:
+        set_mode(STOP, MODE_REASON_STARTUP);
+        break;
+
+    case AUTO:
+    default:
+        set_mode(AUTO, MODE_REASON_STARTUP);
+        break;
+    }
 
     if (g.startup_delay > 0) {
         // arm servos with trim value to allow them to start up (required
@@ -114,13 +126,8 @@ void Tracker::init_tracker()
         prepare_servos();
     }
 
-}
-
-// updates the status of the notify objects
-// should be called at 50hz
-void Tracker::update_notify()
-{
-    notify.update();
+    // disable safety if requested
+    BoardConfig.init_safety();    
 }
 
 /*
@@ -135,42 +142,57 @@ bool Tracker::get_home_eeprom(struct Location &loc)
     }
 
     // read WP position
-    loc.options = wp_storage.read_byte(0);
-    loc.alt = wp_storage.read_uint32(1);
-    loc.lat = wp_storage.read_uint32(5);
-    loc.lng = wp_storage.read_uint32(9);
+    loc = {
+        int32_t(wp_storage.read_uint32(5)),
+        int32_t(wp_storage.read_uint32(9)),
+        int32_t(wp_storage.read_uint32(1)),
+        Location::AltFrame::ABSOLUTE
+    };
 
     return true;
 }
 
-void Tracker::set_home_eeprom(struct Location temp)
+bool Tracker::set_home_eeprom(const Location &temp)
 {
-    wp_storage.write_byte(0, temp.options);
+    wp_storage.write_byte(0, 0);
     wp_storage.write_uint32(1, temp.alt);
     wp_storage.write_uint32(5, temp.lat);
     wp_storage.write_uint32(9, temp.lng);
 
     // Now have a home location in EEPROM
     g.command_total.set_and_save(1); // At most 1 entry for HOME
+    return true;
 }
 
-void Tracker::set_home(struct Location temp)
+bool Tracker::set_home(const Location &temp)
 {
-    set_home_eeprom(temp);
+    // check EKF origin has been set
+    Location ekf_origin;
+    if (ahrs.get_origin(ekf_origin)) {
+        if (!ahrs.set_home(temp)) {
+            return false;
+        }
+    }
+
+    if (!set_home_eeprom(temp)) {
+        return false;
+    }
+
     current_loc = temp;
-    GCS_MAVLINK::send_home_all(temp);
+
+    return true;
 }
 
 void Tracker::arm_servos()
-{    
-    channel_yaw.enable_out();
-    channel_pitch.enable_out();
+{
+    hal.util->set_soft_armed(true);
+    logger.set_vehicle_armed(true);
 }
 
 void Tracker::disarm_servos()
 {
-    channel_yaw.disable_out();
-    channel_pitch.disable_out();
+    hal.util->set_soft_armed(false);
+    logger.set_vehicle_armed(false);
 }
 
 /*
@@ -179,13 +201,13 @@ void Tracker::disarm_servos()
 void Tracker::prepare_servos()
 {
     start_time_ms = AP_HAL::millis();
-    channel_yaw.set_radio_out(channel_yaw.get_radio_trim());
-    channel_pitch.set_radio_out(channel_pitch.get_radio_trim());
-    channel_yaw.output();
-    channel_pitch.output();
+    SRV_Channels::set_output_limit(SRV_Channel::k_tracker_yaw, SRV_Channel::SRV_CHANNEL_LIMIT_TRIM);
+    SRV_Channels::set_output_limit(SRV_Channel::k_tracker_pitch, SRV_Channel::SRV_CHANNEL_LIMIT_TRIM);
+    SRV_Channels::calc_pwm();
+    SRV_Channels::output_ch_all();
 }
 
-void Tracker::set_mode(enum ControlMode mode)
+void Tracker::set_mode(enum ControlMode mode, mode_reason_t reason)
 {
     if (control_mode == mode) {
         // don't switch modes if we are already in the correct mode.
@@ -208,35 +230,9 @@ void Tracker::set_mode(enum ControlMode mode)
     }
 
 	// log mode change
-	DataFlash.Log_Write_Mode(control_mode);
-}
+	logger.Write_Mode(control_mode, reason);
 
-/*
-  set_mode() wrapper for MAVLink SET_MODE
- */
-bool Tracker::mavlink_set_mode(uint8_t mode)
-{
-    switch (mode) {
-    case AUTO:
-    case MANUAL:
-    case SCAN:
-    case SERVO_TEST:
-    case STOP:
-        set_mode((enum ControlMode)mode);
-        return true;
-    }
-    return false;
-}
-
-void Tracker::check_usb_mux(void)
-{
-    bool usb_check = hal.gpio->usb_connected();
-    if (usb_check == usb_connected) {
-        return;
-    }
-
-    // the user has switched to/from the telemetry port
-    usb_connected = usb_check;
+    nav_status.bearing = ahrs.yaw_sensor * 0.01f;
 }
 
 /*
@@ -244,7 +240,7 @@ void Tracker::check_usb_mux(void)
  */
 bool Tracker::should_log(uint32_t mask)
 {
-    if (!(mask & g.log_bitmask) || in_mavlink_delay) {
+    if (!logger.should_log(mask)) {
         return false;
     }
     return true;
